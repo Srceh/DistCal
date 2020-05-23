@@ -573,7 +573,7 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
 
                 theta = valid_theta.copy()
 
-                print('NaN in gradient.')
+                # print('NaN in gradient.')
 
             raw_sample_w = tf.random.normal((sample_size_w, 3 * numpy.shape(q)[0]), dtype='float64')
 
@@ -596,14 +596,16 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
 
             theta = tf.Variable(theta)
 
-            print('=============================================================================')
+            if numpy.mod(len(batch_L), 16) == 0:
 
-            print(theta[:8])
-            print(theta[-6:])
+                print('=============================================================================')
 
-            print('Batch: ' + str(len(batch_L)) + ', optimiser: ' + optimizer_choice + ', Loss: ' + str(tmp_L))
+                print(theta[:8])
+                print(theta[-6:])
 
-            print('=============================================================================')
+                print('Batch: ' + str(len(batch_L)) + ', optimiser: ' + optimizer_choice + ', Loss: ' + str(tmp_L))
+
+                print('=============================================================================')
 
             batch_L.append(numpy.min(tmp_L))
 
@@ -637,9 +639,9 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
 
                 current_opt = numpy.min(batch_L.copy()[-batch_num*16:])
 
-                print('Previous And Recent Top Averaged Loss Is:')
-
-                print(numpy.hstack([previous_opt, current_opt]))
+                if numpy.mod(len(batch_L), 16) == 0:
+                    print('Previous And Recent Top Averaged Loss Is:')
+                    print(numpy.hstack([previous_opt, current_opt]))
 
                 if previous_opt - current_opt <= numpy.abs(previous_opt * factr):
                     converge = True
