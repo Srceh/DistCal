@@ -98,7 +98,7 @@ class GP_Beta:
         else:
             self.kappa = kappa
 
-    def fit(self, y, mu, sigma, n_u, lr=1e-3, optimizer_choice='adam'):
+    def fit(self, y, mu, sigma, n_u, lr=1e-3, optimizer_choice='adam', plot_loss=True):
 
         self.n = numpy.shape(y)[0]
 
@@ -146,7 +146,7 @@ class GP_Beta:
                               self.mu_u.ravel(), self.sigma_u.ravel(), mu_shift])
 
         theta = parameter_update(theta, self.q, self.ln_q, self.ln_1_q, self.ln_s, self.mu, self.sigma,
-                                 self.n_u, self.n, self.jitter, lr=lr, plot_loss=True, optimizer_choice=optimizer_choice)
+                                 self.n_u, self.n, self.jitter, lr=lr, plot_loss=plot_loss, optimizer_choice=optimizer_choice)
 
         c_theta = theta[:8]
 
