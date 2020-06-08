@@ -145,7 +145,7 @@ class GP_Beta:
         theta = numpy.hstack([c_theta.ravel(), A_u.ravel(), L_u.ravel(),
                               self.mu_u.ravel(), self.sigma_u.ravel(), mu_shift])
 
-        theta = parameter_update(theta, self.q, self.ln_q, self.ln_1_q, self.ln_s, self.mu, self.sigma,
+        theta = parameter_update(theta, self.ln_q, self.ln_1_q, self.ln_s, self.mu, self.sigma,
                                  self.n_u, self.n, self.jitter, lr=lr, plot_loss=plot_loss, optimizer_choice=optimizer_choice)
 
         c_theta = theta[:8]
@@ -299,32 +299,31 @@ def get_calibration(t_test, mu_test, sigma_test, mu_w, cov_w, mu_shift):
     return s_hat, q_hat
 
 
-def mc_link_lik(w, mu_shift, q, ln_q, ln_1_q, ln_s):
-
+def mc_link_lik(w, mu_shift, ln_q, ln_1_q, ln_s):
     w_a = w[:, 0::3]
 
     w_b = w[:, 1::3]
 
-    a = -tf.math.exp(w_a / mu_shift[0] + mu_shift[1])
+    ln_a = w_a / mu_shift[0] + mu_shift[1]
+    neg_a = -tf.math.exp(ln_a)
 
-    b = tf.math.exp(w_b / mu_shift[2] + mu_shift[3])
+    ln_b = w_b / mu_shift[2] + mu_shift[3]
+    b = tf.math.exp(ln_b)
 
-    c = w[:, 2::3] / mu_shift[4] + mu_shift[5]
+    c = w[:, 2:: 3] / mu_shift[4] + mu_shift[5]
 
-    tmp_sum = a * tf.squeeze(ln_q) + b * tf.squeeze(ln_1_q) + c
+    tmp_sum = neg_a * ln_q + b * ln_1_q + c
 
-    tmp_de = tf.where(tmp_sum <= 0,
-                      2 * tf.math.log(1 + tf.math.exp(tmp_sum)),
-                      2 * (tmp_sum + tf.math.log(1 + 1 / (tf.math.exp(tmp_sum)))))
+    tmp_de = 2 * tf.math.softplus(tmp_sum)
 
-    ln_s_hat = (tmp_sum + tf.math.log((a + b) * tf.squeeze(q) - a) -
-                tf.squeeze(ln_q) - tf.squeeze(ln_1_q) - tmp_de) + tf.squeeze(ln_s)
+    tmp_logsumexp = tf.math.reduce_logsumexp(
+        tf.stack([ln_a + ln_1_q, ln_b + ln_q], axis=0), axis=0)
 
-    mean_exp = tf.reduce_mean(tf.math.exp(ln_s_hat), axis=0)
+    ln_s_hat = (tmp_sum + tmp_logsumexp - ln_q - ln_1_q - tmp_de) + ln_s
 
-    ln_mean_s_hat = tf.where(mean_exp > 0, tf.math.log(mean_exp),
-                             tf.math.log(tf.zeros_like(mean_exp, dtype='float64') +
-                                         tf.constant(1e-16, dtype='float64')))
+
+    ln_mean_s_hat = tf.math.reduce_logsumexp(
+        ln_s_hat, axis=0) - tf.math.log(tf.cast(tf.shape(ln_s_hat)[0], tf.float64))
 
     link_ll = tf.reduce_sum(ln_mean_s_hat)
 
@@ -409,16 +408,14 @@ def get_noraml_kl(u, C_u, n_u):
     return tf.squeeze(kl)
 
 
-def vi_obj_link_only(theta, q, ln_q, ln_1_q, ln_s, mu, sigma,
-           n_u, n_y, raw_sample_w, jitter):
+def vi_obj_link_only(theta, ln_q, ln_1_q, ln_s, mu, sigma,
+                     n_u, n_y, raw_sample_w, jitter):
 
-    q = tf.convert_to_tensor(q)
+    ln_q = tf.squeeze(tf.convert_to_tensor(ln_q))
 
-    ln_q = tf.convert_to_tensor(ln_q)
+    ln_1_q = tf.squeeze(tf.convert_to_tensor(ln_1_q))
 
-    ln_1_q = tf.convert_to_tensor(ln_1_q)
-
-    ln_s = tf.convert_to_tensor(ln_s)
+    ln_s = tf.squeeze(tf.convert_to_tensor(ln_s))
 
     mu = tf.convert_to_tensor(mu)
 
@@ -449,21 +446,19 @@ def vi_obj_link_only(theta, q, ln_q, ln_1_q, ln_s, mu, sigma,
 
     mu_shift = theta[-6:]
 
-    link_ll = mc_link_lik(sample_w, mu_shift, q, ln_q, ln_1_q, ln_s)
+    link_ll = mc_link_lik(sample_w, mu_shift, ln_q, ln_1_q, ln_s)
 
     return - link_ll
 
 
-def vi_obj(theta, q, ln_q, ln_1_q, ln_s, mu, sigma,
+def vi_obj(theta, ln_q, ln_1_q, ln_s, mu, sigma,
            n_u, n_y, raw_sample_w, jitter):
 
-    q = tf.convert_to_tensor(q)
+    ln_q = tf.squeeze(tf.convert_to_tensor(ln_q))
 
-    ln_q = tf.convert_to_tensor(ln_q)
+    ln_1_q = tf.squeeze(tf.convert_to_tensor(ln_1_q))
 
-    ln_1_q = tf.convert_to_tensor(ln_1_q)
-
-    ln_s = tf.convert_to_tensor(ln_s)
+    ln_s = tf.squeeze(tf.convert_to_tensor(ln_s))
 
     mu = tf.convert_to_tensor(mu)
 
@@ -494,7 +489,8 @@ def vi_obj(theta, q, ln_q, ln_1_q, ln_s, mu, sigma,
 
     mu_shift = theta[-6:]
 
-    link_ll = mc_link_lik(sample_w, mu_shift, q, ln_q, ln_1_q, ln_s)
+    link_ll = mc_link_lik(sample_w, mu_shift, ln_q,
+                          ln_1_q, ln_s)
 
     kl = get_noraml_kl(u, tf.squeeze(tf.reshape(C_u, [1, -1])), n_u)
 
@@ -503,7 +499,7 @@ def vi_obj(theta, q, ln_q, ln_1_q, ln_s, mu, sigma,
     return obj
 
 
-def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter,
+def parameter_update(theta_0, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter,
                      sample_size_w=4096, batch_size=None, optimizer_choice='adam',
                      lr=1e-3, max_batch=int(1024), factr=1e-8, plot_loss=True):
 
@@ -546,7 +542,6 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
             raw_sample_w = tf.random.normal((sample_size_w, 3 * (batch_idx[j + 1] - batch_idx[j])), dtype='float64')
 
             _, g_t = get_obj_g(theta,
-                               q[batch_idx[j]:batch_idx[j + 1]],
                                ln_q[batch_idx[j]:batch_idx[j + 1]],
                                ln_1_q[batch_idx[j]:batch_idx[j + 1]],
                                ln_s[batch_idx[j]:batch_idx[j + 1]],
@@ -555,40 +550,30 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
                                n_u, (batch_idx[j + 1] - batch_idx[j]),
                                raw_sample_w, jitter)
 
-            if numpy.isfinite(numpy.sum(g_t.numpy())):
+            optimizer.apply_gradients(zip([g_t], [theta]))
 
-                valid_theta = theta.numpy()
+            theta = theta.numpy()
 
-                optimizer.apply_gradients(zip([g_t], [theta]))
+            theta[:2] = numpy.abs(theta[:2])
 
-                theta = theta.numpy()
+            theta[:2][theta[:2] <= 1e-8] = 1e-8
 
-                theta[:2] = numpy.abs(theta[:2])
+            theta[5:8][theta[5:8] <= 1e-8] = 1e-8
 
-                theta[:2][theta[:2] <= 1e-8] = 1e-8
 
-                theta[5:8][theta[5:8] <= 1e-8] = 1e-8
-
-            else:
-
-                theta = valid_theta.copy()
-
-                # print('NaN in gradient.')
-
-            raw_sample_w = tf.random.normal((sample_size_w, 3 * numpy.shape(q)[0]), dtype='float64')
+            raw_sample_w = tf.random.normal((sample_size_w, 3 * numpy.shape(ln_q)[0]), dtype='float64')
 
             L_t = vi_obj(theta,
-                         q,
                          ln_q,
                          ln_1_q,
                          ln_s,
                          mu,
                          sigma,
                          n_u,
-                         numpy.shape(q)[0],
+                         numpy.shape(ln_q)[0],
                          raw_sample_w, jitter)
 
-            tmp_L = (L_t.numpy() / numpy.shape(q)[0])
+            tmp_L = (L_t.numpy() / numpy.shape(ln_q)[0])
 
             if len(batch_L) >= 2:
                 if tmp_L < numpy.min(batch_L[:-1]):
@@ -652,8 +637,6 @@ def parameter_update(theta_0, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter
                     break
 
         per_idx = numpy.random.permutation(n_y)
-
-        q = q[per_idx]
 
         ln_q = ln_q[per_idx]
 
@@ -799,13 +782,14 @@ def coregion(omega, kappa):
     return B
 
 
-def get_obj_g(theta, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, raw_sample_w, jitter):
+def get_obj_g(theta, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, raw_sample_w, jitter):
 
     with tf.GradientTape() as gt:
         
         gt.watch(theta)
 
-        obj = vi_obj(theta, q, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, raw_sample_w, jitter)
+        obj = vi_obj(theta, ln_q, ln_1_q, ln_s, mu,
+                     sigma, n_u, n_y, raw_sample_w, jitter)
 
         g = gt.gradient(obj, theta)
 
