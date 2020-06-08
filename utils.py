@@ -450,32 +450,24 @@ def get_cal_error(q_y):
 
 
 def get_pin_ball_loss(y, q_hat, t_test):
+    """
+    Compute pinball loss for quantile levels tau = 0.05, 0.1, ..., 0.95.
 
-    n, m = numpy.shape(q_hat)
+    Returns the averaged pinball loss and the pinball loss for every quantile
+    level as a concatenated array.
+    """
+    tau = numpy.linspace(0, 1, 21)[1:-1].reshape(-1, 1)
 
-    y = y.ravel()
+    # obtain approximate quantiles for all predictions and quantile levels
+    t_loc = numpy.argmin(numpy.abs(tau[:, :, numpy.newaxis] - q_hat), axis=2)
+    y_hat = t_test[t_loc]
 
-    tau = numpy.linspace(0, 1, 21)[1:-1]
+    # compute pinball loss for all quantile levels
+    tmp_z = y.ravel() - y_hat
+    loss = numpy.mean(numpy.where(tmp_z >= 0, tau, tau-1) * tmp_z, axis=1)
 
-    loss = numpy.zeros(len(tau))
-
-    y_hat = numpy.zeros((n, len(tau)))
-
-    for i in range(0, n):
-        for j in range(0, 19):
-            t_loc = numpy.argmin(numpy.abs(tau[j] - q_hat[i, :]))
-            y_hat[i, j] = t_test[t_loc]
-            tmp_z = (y[i] - y_hat[i, j])
-            if tmp_z >= 0:
-                loss[j] = loss[j] + tau[j] * tmp_z
-            else:
-                loss[j] = loss[j] + (tau[j] - 1) * tmp_z
-
-    pbl = numpy.zeros(20)
-
-    pbl[1:20] = loss
-
-    pbl[0] = numpy.mean(loss)
+    # compute averaged pinball loss as well
+    pbl = numpy.concatenate(([numpy.mean(loss)], loss))
 
     return pbl
 
