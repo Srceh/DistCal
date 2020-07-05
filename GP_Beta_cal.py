@@ -6,6 +6,8 @@ import tensorflow as tf
 
 import tensorflow.keras.optimizers as optimizers
 
+import joblib
+
 import matplotlib
 
 matplotlib.use('Agg')
@@ -98,7 +100,10 @@ class GP_Beta:
         else:
             self.kappa = kappa
 
-    def fit(self, y, mu, sigma, n_u, lr=1e-3, optimizer_choice='adam', plot_loss=True):
+    def fit(self, y, mu, sigma, n_u,
+            sample_size_w=1024, batch_size=16, val_size=1024, optimizer_choice='adam',
+            lr_list=numpy.array([1e-2]), tol_list=numpy.array([128]),
+            factr=1e-8, plot_loss=True, print_info=True):
 
         self.n = numpy.shape(y)[0]
 
@@ -122,15 +127,13 @@ class GP_Beta:
 
         c_theta[1] = 1.0
 
-        c_theta[2:5] = numpy.random.randn(3)
+        c_theta[2:5] = numpy.random.randn(3) * 1e-8
 
         c_theta[5:] = 1.0
 
         self.n_u = n_u
 
-        self.mu_u = (numpy.random.choice(mu.ravel(), self.n_u, replace=False)).reshape(-1, 1) + numpy.random.randn(self.n_u, 1)
-
-        # self.sigma_u = numpy.abs(numpy.random.choice(sigma.ravel(), self.n_u, replace=False)).reshape(-1, 1)
+        self.mu_u = numpy.linspace(numpy.min(mu), numpy.max(mu), n_u).reshape(-1, 1)
 
         self.sigma_u = numpy.ones((self.n_u, 1))
         
@@ -145,8 +148,14 @@ class GP_Beta:
         theta = numpy.hstack([c_theta.ravel(), A_u.ravel(), L_u.ravel(),
                               self.mu_u.ravel(), self.sigma_u.ravel(), mu_shift])
 
-        theta = parameter_update(theta, self.ln_q, self.ln_1_q, self.ln_s, self.mu, self.sigma,
-                                 self.n_u, self.n, self.jitter, lr=lr, plot_loss=plot_loss, optimizer_choice=optimizer_choice)
+        for i in range(0, len(lr_list)):
+            print('learning rate: ' + str(lr_list[i]))
+            theta = parameter_update(theta, self.ln_q, self.ln_1_q, self.ln_s, self.mu, self.sigma,
+                                     self.n_u, self.n, self.jitter, sample_size_w=sample_size_w,
+                                     batch_size=batch_size, val_size=val_size, lr=lr_list[i],
+                                     tol=tol_list[i], factr=factr,
+                                     plot_loss=plot_loss, print_info=print_info,
+                                     optimizer_choice=optimizer_choice)
 
         c_theta = theta[:8]
 
@@ -174,8 +183,8 @@ class GP_Beta:
 
         self.B = coregion(self.omega, self.kappa).numpy()
 
-        C_u = kernel(c_theta, self.mu_u, self.sigma_u, 
-                    jitter=tf.constant(self.jitter, dtype='float64')).numpy()
+        C_u = kernel(c_theta, self.mu_u, self.sigma_u,
+                     jitter=tf.constant(self.jitter, dtype='float64')).numpy()
 
         C_inv_u = numpy.linalg.inv(C_u)
 
@@ -183,7 +192,13 @@ class GP_Beta:
 
         self.C_u_inv = C_inv_u
 
-    def predict(self, t_test, mu_test, sigma_test):
+    def predict(self, t_test, mu_test, sigma_test, n_jobs=None):
+
+        if n_jobs is None:
+            import multiprocessing
+            n_jobs = multiprocessing.cpu_count()
+
+        n_y = numpy.shape(mu_test)[0]
 
         if self.mu_w_test is None:
             mu_w_test, cov_w_test = predict_new_w(self, mu_test, sigma_test)
@@ -192,16 +207,22 @@ class GP_Beta:
 
             self.cov_w_test = cov_w_test.copy()
 
-        s_hat, q_hat = get_calibration(t_test, mu_test, sigma_test, self.mu_w_test, self.cov_w_test, self.mu_shift)
+        res = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(get_calibration)(i,
+                                                                             t_test,
+                                                                             mu_test,
+                                                                             sigma_test,
+                                                                             self.mu_w_test,
+                                                                             self.cov_w_test,
+                                                                             self.mu_shift) for i in range(0, n_y))
+
+        s_hat = numpy.squeeze(numpy.vstack([res[i][0]] for i in range(0, n_y)))
+
+        q_hat = numpy.squeeze(numpy.vstack([res[i][1]] for i in range(0, n_y)))
 
         return s_hat, q_hat
 
 
 def predict_new_w(mdl, mu_test, sigma_test):
-
-    y_train = mdl.y
-
-    n_y = numpy.shape(y_train)[0]
 
     n_test = numpy.shape(mu_test)[0]
 
@@ -244,59 +265,66 @@ def predict_new_w(mdl, mu_test, sigma_test):
     return mu_w_hat, cov_w_hat
 
 
-def get_calibration(t_test, mu_test, sigma_test, mu_w, cov_w, mu_shift):
+def get_calibration(i, t_test, mu_test, sigma_test, mu_w, cov_w, mu_shift):
 
-    n_y = numpy.shape(mu_test)[0]
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    # n_y = numpy.shape(mu_test)[0]
 
     n_t = numpy.shape(t_test)[1]
 
-    q_hat = numpy.zeros((n_y, n_t))
+    # q_hat = numpy.zeros((n_y, n_t))
 
-    s_hat = numpy.zeros((n_y, n_t))
+    # s_hat = numpy.zeros((n_y, n_t))
 
-    for i in range(0, n_y):
+    # for i in range(0, n_y):
 
-        ln_s = scipy.stats.norm.logpdf(x=t_test, loc=mu_test[i, :], scale=sigma_test[i, :]).reshape(-1, 1)
+    ln_s = scipy.stats.norm.logpdf(x=t_test, loc=mu_test[i, :], scale=sigma_test[i, :]).reshape(-1, 1)
 
-        feature_q = numpy.hstack([scipy.stats.norm.logcdf(x=t_test, loc=mu_test[i, :],
-                                                          scale=sigma_test[i, :]).reshape(-1, 1),
-                                  scipy.stats.norm.logsf(x=t_test, loc=mu_test[i, :],
-                                                         scale=sigma_test[i, :]).reshape(-1, 1),
-                                  numpy.ones((n_t, 1))])
+    feature_q = numpy.hstack([scipy.stats.norm.logcdf(x=t_test, loc=mu_test[i, :],
+                                                      scale=sigma_test[i, :]).reshape(-1, 1),
+                              scipy.stats.norm.logsf(x=t_test, loc=mu_test[i, :],
+                                                     scale=sigma_test[i, :]).reshape(-1, 1),
+                              numpy.ones((n_t, 1))])
 
-        w_sample = scipy.stats.multivariate_normal.rvs(size=4096, mean=mu_w[i, :], cov=cov_w[i, :, :])
+    w_sample = scipy.stats.multivariate_normal.rvs(size=1024, mean=mu_w[i, :], cov=cov_w[i, :, :])
 
-        w_sample[:, 0] = -numpy.exp(w_sample[:, 0] / mu_shift[0] + mu_shift[1])
+    w_sample[:, 0] = -numpy.exp(w_sample[:, 0] / mu_shift[0] + mu_shift[1])
 
-        w_sample[:, 1] = numpy.exp(w_sample[:, 1] / mu_shift[2] + mu_shift[3])
+    w_sample[:, 1] = numpy.exp(w_sample[:, 1] / mu_shift[2] + mu_shift[3])
 
-        w_sample[:, 2] = w_sample[:, 2] / mu_shift[4] + mu_shift[5]
+    w_sample[:, 2] = w_sample[:, 2] / mu_shift[4] + mu_shift[5]
 
-        raw_prod = numpy.matmul(feature_q, w_sample.transpose())
+    raw_prod = numpy.matmul(feature_q, w_sample.transpose())
 
-        MAX = raw_prod.copy()
+    MAX = raw_prod.copy()
 
-        MAX[MAX < 0] = 0
+    MAX[MAX < 0] = 0
 
-        q_hat[i, :] = numpy.mean(numpy.exp(-MAX) / (numpy.exp(-MAX) + numpy.exp(raw_prod - MAX)), axis=1).ravel()
+    q_hat = numpy.mean(numpy.exp(-MAX) / (numpy.exp(-MAX) + numpy.exp(raw_prod - MAX)), axis=1).ravel()
 
-        tmp_de = numpy.where(raw_prod <= 0,
-                             2 * numpy.log(1 + numpy.exp(raw_prod)),
-                             2 * (raw_prod + numpy.log(1 + 1 / numpy.exp(raw_prod))))
+    tmp_de = numpy.where(raw_prod <= 0,
+                         2 * numpy.log(1 + numpy.exp(raw_prod)),
+                         2 * (raw_prod + numpy.log(1 + 1 / numpy.exp(raw_prod))))
 
-        ln_s_hat = (raw_prod + numpy.log((w_sample[:, 0] + w_sample[:, 1]) * numpy.exp(feature_q[:, 0].reshape(-1, 1)) -
-                                         w_sample[:, 0]) - feature_q[:, 0].reshape(-1, 1) -
-                    feature_q[:, 1].reshape(-1, 1) - tmp_de) + ln_s
+    ln_s_hat = (raw_prod + numpy.log((w_sample[:, 0] + w_sample[:, 1]) * numpy.exp(feature_q[:, 0].reshape(-1, 1)) -
+                                     w_sample[:, 0]) - feature_q[:, 0].reshape(-1, 1) -
+                feature_q[:, 1].reshape(-1, 1) - tmp_de) + ln_s
 
-        mc_s_hat = numpy.exp(ln_s_hat)
+    mc_s_hat = numpy.exp(ln_s_hat)
 
-        mc_s_hat[numpy.isnan(mc_s_hat)] = 0
+    if (numpy.sum(numpy.isnan(mc_s_hat)) > 0) | (numpy.sum(numpy.isinf(mc_s_hat) > 0)):
+        import pdb
+        pdb.set_trace()
 
-        mc_s_hat[numpy.isinf(mc_s_hat)] = 0
+    mc_s_hat[numpy.isnan(mc_s_hat)] = 0
 
-        s_hat[i, :] = numpy.mean(mc_s_hat, axis=1).ravel()
+    mc_s_hat[numpy.isinf(mc_s_hat)] = 0
 
-    return s_hat, q_hat
+    s_hat = numpy.mean(mc_s_hat, axis=1).ravel()
+
+    return s_hat.reshape(1, -1), q_hat.reshape(1, -1)
 
 
 def mc_link_lik(w, mu_shift, ln_q, ln_1_q, ln_s):
@@ -320,7 +348,6 @@ def mc_link_lik(w, mu_shift, ln_q, ln_1_q, ln_s):
         tf.stack([ln_a + ln_1_q, ln_b + ln_q], axis=0), axis=0)
 
     ln_s_hat = (tmp_sum + tmp_logsumexp - ln_q - ln_1_q - tmp_de) + ln_s
-
 
     ln_mean_s_hat = tf.math.reduce_logsumexp(
         ln_s_hat, axis=0) - tf.math.log(tf.cast(tf.shape(ln_s_hat)[0], tf.float64))
@@ -408,51 +435,8 @@ def get_noraml_kl(u, C_u, n_u):
     return tf.squeeze(kl)
 
 
-def vi_obj_link_only(theta, ln_q, ln_1_q, ln_s, mu, sigma,
-                     n_u, n_y, raw_sample_w, jitter):
-
-    ln_q = tf.squeeze(tf.convert_to_tensor(ln_q))
-
-    ln_1_q = tf.squeeze(tf.convert_to_tensor(ln_1_q))
-
-    ln_s = tf.squeeze(tf.convert_to_tensor(ln_s))
-
-    mu = tf.convert_to_tensor(mu)
-
-    sigma = tf.convert_to_tensor(sigma)
-
-    c_theta = theta[:8]
-
-    u = theta[8:8+3*n_u+9*n_u**2]
-
-    mu_u = tf.reshape(theta[8+3*n_u+9*n_u**2:8+3*n_u+9*n_u**2+n_u], [-1, 1])
-
-    sigma_u = tf.reshape(theta[8+3*n_u+9*n_u**2+n_u:-6], [-1, 1])
-
-    C_u = kernel(c_theta, mu_u, sigma_u, jitter=tf.constant(jitter, dtype='float64'))
-
-    C_wu = kernel_test(c_theta, mu, sigma, mu_u, sigma_u)
-
-    C_wu = tf.transpose(C_wu[:3*n_u, :])
-
-    C_diag_w = kernel_diag(c_theta, mu, sigma, jitter=tf.constant(jitter, dtype='float64'))
-
-    sample_w = \
-        get_sample_w(u,
-                     tf.squeeze(tf.reshape(C_u, [1, -1])),
-                     tf.squeeze(tf.reshape(C_wu, [1, -1])),
-                     tf.squeeze(tf.reshape(C_diag_w, [1, -1])),
-                     raw_sample_w, n_u, n_y)
-
-    mu_shift = theta[-6:]
-
-    link_ll = mc_link_lik(sample_w, mu_shift, ln_q, ln_1_q, ln_s)
-
-    return - link_ll
-
-
 def vi_obj(theta, ln_q, ln_1_q, ln_s, mu, sigma,
-           n_u, n_y, raw_sample_w, jitter):
+           n_u, n_batch, n_y, raw_sample_w, jitter):
 
     ln_q = tf.squeeze(tf.convert_to_tensor(ln_q))
 
@@ -485,7 +469,7 @@ def vi_obj(theta, ln_q, ln_1_q, ln_s, mu, sigma,
                      tf.squeeze(tf.reshape(C_u, [1, -1])),
                      tf.squeeze(tf.reshape(C_wu, [1, -1])),
                      tf.squeeze(tf.reshape(C_diag_w, [1, -1])),
-                     raw_sample_w, n_u, n_y)
+                     raw_sample_w, n_u, n_batch)
 
     mu_shift = theta[-6:]
 
@@ -494,16 +478,18 @@ def vi_obj(theta, ln_q, ln_1_q, ln_s, mu, sigma,
 
     kl = get_noraml_kl(u, tf.squeeze(tf.reshape(C_u, [1, -1])), n_u)
 
-    obj = - link_ll + kl
+    obj = - link_ll * (n_y / n_batch) + kl
 
     return obj
 
 
 def parameter_update(theta_0, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter,
-                     sample_size_w=4096, batch_size=None, optimizer_choice='adam',
-                     lr=1e-3, max_batch=int(1024), factr=1e-8, plot_loss=True):
+                     sample_size_w=1024, batch_size=None, val_size=None, optimizer_choice='adam',
+                     lr=1e-3, max_batch=int(4096), tol=8, factr=1e-3, plot_loss=True, print_info=True):
 
     batch_L = []
+
+    gap = []
 
     if optimizer_choice == 'adam':
         optimizer = optimizers.Adam(lr=lr)
@@ -514,142 +500,145 @@ def parameter_update(theta_0, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, jitter,
     elif optimizer_choice == 'adamax':
         optimizer = optimizers.Adamax(lr=lr)
     elif optimizer_choice == 'ftrl':
-        optimizer = optimizers.Ftrl(lr=lr)
+        optimizer =optimizers.Ftrl(lr=lr)
     elif optimizer_choice == 'nadam':
         optimizer = optimizers.Nadam(lr=lr)
     elif optimizer_choice == 'rmsprop':
         optimizer = optimizers.RMSprop(lr=lr)
     elif optimizer_choice == 'sgd':
         optimizer = optimizers.SGD(lr=lr)
+    else:
+        optimizer = None
 
     theta = tf.Variable(theta_0)
 
     fin_theta = theta_0.copy()
 
-    if batch_size is None:
-        batch_size = int(numpy.floor(n_y / 2))
-
-    batch_idx = numpy.arange(0, n_y, batch_size)
-
-    batch_num = len(batch_idx) - 1
-
-    converge = False
+    if val_size is not None:
+        if val_size > n_y:
+            val_size = n_y
+            val_idx = numpy.arange(0, n_y)
+        else:
+            val_idx = numpy.random.choice(numpy.arange(0, n_y), val_size, replace=False)
+    else:
+        val_idx = None
 
     for i in range(0, int(1e8)):
 
-        for j in range(0, batch_num):
+        if batch_size is None:
+            tmp_idx = numpy.arange(0, n_y)
+        else:
+            tmp_idx = numpy.random.choice(numpy.arange(0, n_y), batch_size, replace=False)
 
-            raw_sample_w = tf.random.normal((sample_size_w, 3 * (batch_idx[j + 1] - batch_idx[j])), dtype='float64')
+        raw_sample_w = tf.random.normal((sample_size_w, 3 * len(tmp_idx)), dtype='float64')
 
-            _, g_t = get_obj_g(theta,
-                               ln_q[batch_idx[j]:batch_idx[j + 1]],
-                               ln_1_q[batch_idx[j]:batch_idx[j + 1]],
-                               ln_s[batch_idx[j]:batch_idx[j + 1]],
-                               mu[batch_idx[j]:batch_idx[j + 1]],
-                               sigma[batch_idx[j]:batch_idx[j + 1]],
-                               n_u, (batch_idx[j + 1] - batch_idx[j]),
-                               raw_sample_w, jitter)
+        L_t, g_t = get_obj_g(theta,
+                             ln_q[tmp_idx],
+                             ln_1_q[tmp_idx],
+                             ln_s[tmp_idx],
+                             mu[tmp_idx],
+                             sigma[tmp_idx],
+                             n_u, len(tmp_idx), n_y,
+                             raw_sample_w, jitter)
 
-            optimizer.apply_gradients(zip([g_t], [theta]))
+        optimizer.apply_gradients(zip([g_t], [theta]))
 
-            theta = theta.numpy()
+        theta = theta.numpy()
 
-            theta[:2] = numpy.abs(theta[:2])
+        theta[:2] = numpy.abs(theta[:2])
 
-            theta[:2][theta[:2] <= 1e-8] = 1e-8
+        theta[:2][theta[:2] <= 1e-8] = 1e-8
 
-            theta[5:8][theta[5:8] <= 1e-8] = 1e-8
+        theta[5:8][theta[5:8] <= 1e-8] = 1e-8
 
+        if val_size is not None:
 
-            raw_sample_w = tf.random.normal((sample_size_w, 3 * numpy.shape(ln_q)[0]), dtype='float64')
+            if numpy.mod(i, numpy.min([numpy.floor(tol / 2), 8])) == 0:
 
-            L_t = vi_obj(theta,
-                         ln_q,
-                         ln_1_q,
-                         ln_s,
-                         mu,
-                         sigma,
-                         n_u,
-                         numpy.shape(ln_q)[0],
-                         raw_sample_w, jitter)
+                raw_sample_w = tf.random.normal((sample_size_w, 3 * val_size), dtype='float64')
 
-            tmp_L = (L_t.numpy() / numpy.shape(ln_q)[0])
+                tmp_L_t = vi_obj(theta,
+                                 ln_q[val_idx],
+                                 ln_1_q[val_idx],
+                                 ln_s[val_idx],
+                                 mu[val_idx],
+                                 sigma[val_idx],
+                                 n_u, val_size, n_y,
+                                 raw_sample_w, jitter)
 
-            if len(batch_L) >= 2:
-                if tmp_L < numpy.min(batch_L[:-1]):
-                    fin_theta = theta.copy()
+            tmp_L = (tmp_L_t.numpy() / n_y)
 
-            theta = tf.Variable(theta)
+        else:
 
-            if numpy.mod(len(batch_L), 16) == 0:
+            tmp_L = (L_t.numpy() / n_y)
 
-                print('=============================================================================')
+        batch_L.append(numpy.min(tmp_L))
 
-                print(theta[:8])
-                print(theta[-6:])
+        if len(batch_L) >= 2:
+            if tmp_L < numpy.min(batch_L[:-1]):
+                fin_theta = theta.copy()
 
-                print('Batch: ' + str(len(batch_L)) + ', optimiser: ' + optimizer_choice + ', Loss: ' + str(tmp_L))
+        theta = tf.Variable(theta)
 
-                print('=============================================================================')
+        if (numpy.mod(len(batch_L), tol) == 0) & print_info:
 
-            batch_L.append(numpy.min(tmp_L))
+            print('=============================================================================')
 
-            if plot_loss:
-                fig = matplotlib.pyplot.figure(figsize=(16, 9))
+            print(theta[:8])
+            print(theta[-6:])
 
-                matplotlib.pyplot.plot(numpy.arange(0, len(batch_L)),
-                                       numpy.array(batch_L))
+            print('Batch: ' + str(len(batch_L)) + ', optimiser: ' + optimizer_choice + ', Loss: ' + str(tmp_L))
 
-                matplotlib.pyplot.xlabel('Batches')
+            print('=============================================================================')
 
-                matplotlib.pyplot.ylabel('Loss')
+        if len(batch_L) > tol:
+            previous_opt = numpy.min(batch_L.copy()[:-tol])
 
-                matplotlib.pyplot.title('Learning Rate: ' + str(lr))
+            current_opt = numpy.min(batch_L.copy()[-tol:])
 
-                matplotlib.pyplot.grid(True)
+            gap.append(previous_opt - current_opt)
 
-                matplotlib.pyplot.ylim([numpy.min(batch_L), numpy.median(batch_L)])
+            if (numpy.mod(len(batch_L), tol) == 0) & print_info:
+                print('Previous And Recent Top Averaged Loss Is:')
+                print(numpy.hstack([previous_opt, current_opt]))
 
-                try:
-                    fig.savefig('./' + str(n_u) + '_' + optimizer_choice + '_' + str(lr) + '.png', bbox_inches='tight')
-                except PermissionError:
-                    pass
-                except OSError:
-                    pass
+                print('Current Improvement, Initial Improvement * factr')
+                print(numpy.hstack([gap[-1], gap[0] * factr]))
 
-                matplotlib.pyplot.close(fig)
+            if (len(gap) >= 2) & (gap[-1] <= (gap[0] * factr)):
+                print('Total batch number: ' + str(len(batch_L)))
+                print('Initial Loss: ' + str(batch_L[0]))
+                print('Final Loss: ' + str(numpy.min(batch_L)))
+                print('Current Improvement, Initial Improvement * factr')
+                print(numpy.hstack([gap[-1], gap[0] * factr]))
+                break
 
-            if len(batch_L) > batch_num*16:
-                previous_opt = numpy.min(batch_L.copy()[:-batch_num*16])
+            if len(batch_L) >= max_batch:
+                break
 
-                current_opt = numpy.min(batch_L.copy()[-batch_num*16:])
+    if plot_loss:
+        fig = matplotlib.pyplot.figure(figsize=(16, 9))
 
-                if numpy.mod(len(batch_L), 16) == 0:
-                    print('Previous And Recent Top Averaged Loss Is:')
-                    print(numpy.hstack([previous_opt, current_opt]))
+        matplotlib.pyplot.plot(numpy.arange(0, len(batch_L)),
+                               numpy.array(batch_L))
 
-                if previous_opt - current_opt <= numpy.abs(previous_opt * factr):
-                    converge = True
-                    break
+        matplotlib.pyplot.xlabel('Batches')
 
-                if len(batch_L) >= max_batch:
-                    converge = True
-                    break
+        matplotlib.pyplot.ylabel('Loss')
 
-        per_idx = numpy.random.permutation(n_y)
+        matplotlib.pyplot.title('Learning Rate: ' + str(lr))
 
-        ln_q = ln_q[per_idx]
+        matplotlib.pyplot.grid(True)
 
-        ln_1_q = ln_1_q[per_idx]
+        try:
+            fig.savefig('./' + str(n_y) + '_' + str(n_u) + '_' + optimizer_choice + '_' + str(lr) +
+                        '.png', bbox_inches='tight')
+        except PermissionError:
+            pass
+        except OSError:
+            pass
 
-        ln_s = ln_s[per_idx]
-
-        mu = mu[per_idx]
-
-        sigma = sigma[per_idx]
-
-        if converge:
-            break
+        matplotlib.pyplot.close(fig)
 
     return fin_theta
 
@@ -782,19 +771,16 @@ def coregion(omega, kappa):
     return B
 
 
-def get_obj_g(theta, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_y, raw_sample_w, jitter):
+def get_obj_g(theta, ln_q, ln_1_q, ln_s, mu, sigma, n_u, n_batch, n_y, raw_sample_w, jitter):
 
     with tf.GradientTape() as gt:
         
         gt.watch(theta)
 
         obj = vi_obj(theta, ln_q, ln_1_q, ln_s, mu,
-                     sigma, n_u, n_y, raw_sample_w, jitter)
+                     sigma, n_u, n_batch, n_y, raw_sample_w, jitter)
 
         g = gt.gradient(obj, theta)
 
     return obj, g
-
-
-# get_obj_g = tfe.gradients_function(vi_obj, params=[0])
 
