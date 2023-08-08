@@ -192,7 +192,7 @@ class GP_Beta:
 
         self.C_u_inv = C_inv_u
 
-    def predict(self, t_test, mu_test, sigma_test, n_jobs=None):
+    def predict(self, t_test, mu_test, sigma_test, n_jobs=4):
 
         if n_jobs is None:
             import multiprocessing
